@@ -37,7 +37,7 @@ class SimpleMap extends Component {
           <AnyReactComponent
             lat={59.955413}
             lng={30.337844}
-            text={'Kreyser Avrora'}
+            text="My Marker"
           />
         </GoogleMapReact>
       </div>
@@ -69,7 +69,7 @@ yarn add google-map-react
 
 ### Works with your Components
 
-Instead of the ugly Google Maps markers, balloons and other map components, you can render your cool animated react components on the map.
+Instead of the default Google Maps markers, balloons and other map components, you can render your cool animated react components on the map.
 
 ### Isomorphic Rendering
 
@@ -82,6 +82,38 @@ It renders components on the map before (and even without) the Google Maps API l
 ### Google Maps API Loads on Demand
 
 There is no need to place a `<script src=` tag at top of page. The Google Maps API loads upon the first usage of the `GoogleMapReact` component.
+
+### Use Google Maps API 
+
+You can access to Google Maps `map` and `maps` objects by using `onGoogleApiLoaded`, in this case you will need to set `yesIWantToUseGoogleMapApiInternals` to `true`
+
+```javascript
+...
+
+const handleApiLoaded = (map, maps) => {
+  // use map and maps objects
+};
+
+...
+
+<GoogleMapReact
+  bootstrapURLKeys={{ key: /* YOUR KEY HERE */ }}
+  defaultCenter={this.props.center}
+  defaultZoom={this.props.zoom}
+  yesIWantToUseGoogleMapApiInternals
+  onGoogleApiLoaded={({ map, maps }) => handleApiLoaded(map, maps)}
+>
+  <AnyReactComponent
+    lat={59.955413}
+    lng={30.337844}
+    text="My Marker"
+  />
+</GoogleMapReact>
+```
+
+PST: Remember to set `yesIWantToUseGoogleMapApiInternals` to true.
+
+[Example here](https://github.com/google-map-react/google-map-react-examples/blob/master/src/examples/Main.js#L69)
 
 ### Internal Hover Algorithm
 
@@ -105,7 +137,9 @@ Now every object on the map can be hovered (however, you can still use css hover
 * Example project:
 [main](http://google-map-react.github.io/google-map-react/map/main/) ([source](https://github.com/google-map-react/old-examples/blob/master/web/flux/components/examples/x_main/main_map_block.jsx)); [balderdash](http://google-map-react.github.io/google-map-react/map/balderdash/) (same source as main)
 
-* Clustering example (**new**: [source](https://github.com/istarkov/google-map-clustering-example))
+* Clustering example using Hooks (**new**: [source](https://github.com/leighhalliday/google-maps-clustering), [article](https://www.leighhalliday.com/google-maps-clustering)) [clustering-with-hooks](https://google-maps-clustering.netlify.com/)
+
+* Clustering example ([source](https://github.com/istarkov/google-map-clustering-example))
 [google-map-clustering-example](http://istarkov.github.io/google-map-clustering-example/)
 
 * How to render thousands of markers (**new**: [source](https://github.com/istarkov/google-map-thousands-markers))
@@ -134,25 +168,38 @@ You can find the documentation here:
 
 ## Contribute
 
-To get a reloadable env, with map, clone this project and
+Local development is broken into two parts (ideally using two tabs).
 
-```shell
-npm install
-npm run start
-# open browser at localhost:4000
+First, run rollup to watch your `src/` module and automatically recompile it into `dist/` whenever you make changes.
+
+```bash
+npm start # runs rollup with watch flag
 ```
 
-## Thank you
+The second part will be running the `example/` create-react-app that's linked to the local version of your module.
 
-(*Really big thanks to [April Arcus](https://github.com/AprilArcus) for documentation fixes*)
+```bash
+# (in another tab)
+cd example
+npm start # runs create-react-app dev server
+```
 
-(*thank you [Dan Abramov](http://gaearon.github.io/react-dnd/) for titles structure*)
+Now, anytime you make a change to your library in `src/` or to the example app's `example/src`, `create-react-app` will live-reload your local dev server so you can iterate on your component in real-time.
 
-(*great thanks to [Vladimir Akimov](https://github.com/b2whats) he knows why*)
+### Manual link-install
+If you get the error `Module not found: Can't resolve 'google-react-map'...` while trying to run the example app, you need to manually link your local development module, try the following steps:
+  1. In the root folder:
+  ```bash
+  npm link
+  ```
+  2. Go into `example/` and (after installing other dependencies) execute:
+  ```bash
+  npm link google-map-react
+  ```
 
 ## License
 
-MIT (http://www.opensource.org/licenses/mit-license.php)
+[MIT](./LICENSE.md)
 
 ## Known Issues
 
