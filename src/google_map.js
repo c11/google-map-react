@@ -1,4 +1,4 @@
-/* eslint-disable import/no-extraneous-dependencies, react/forbid-prop-types, react/no-find-dom-node, no-console */
+/* eslint-disable import/no-extraneous-dependencies, react/forbid-prop-types, react/no-find-dom-node, no-console, no-undef */
 import React, { Component } from 'react';
 import PropTypes from 'prop-types';
 import ReactDOM from 'react-dom';
@@ -13,19 +13,24 @@ import { generateHeatmap, optionsHeatmap } from './google_heatmap';
 // loaders
 import googleMapLoader from './loaders/google_map_loader';
 
-// utils
-import Geo from './utils/geo';
+// lib
+import Geo from './lib/geo';
+
+// tools
 import raf from './utils/raf';
-import pick from './utils/pick';
+import log2 from './utils/log2';
 import omit from './utils/omit';
-import log2 from './utils/math/log2';
+import pick from './utils/pick';
 import isEmpty from './utils/isEmpty';
 import isNumber from './utils/isNumber';
 import detectBrowser from './utils/detect';
 import shallowEqual from './utils/shallowEqual';
 import isPlainObject from './utils/isPlainObject';
 import isArraysEqualEps from './utils/isArraysEqualEps';
-import detectElementResize from './utils/detectElementResize';
+import {
+  addResizeListener,
+  removeResizeListener,
+} from './utils/detectElementResize';
 import addPassiveEventListener from './utils/passiveEvents';
 
 // consts
@@ -38,6 +43,11 @@ const DEFAULT_MIN_ZOOM = 3;
 // Starting with version 3.32, the maps API calls `draw()` each frame during
 // a zoom animation.
 const DRAW_CALLED_DURING_ANIMATION_VERSION = 32;
+const IS_REACT_16 = ReactDOM.createPortal !== undefined;
+
+const createPortal = IS_REACT_16
+  ? ReactDOM.createPortal
+  : ReactDOM.unstable_renderSubtreeIntoContainer;
 
 function defaultOptions_(/* maps */) {
   return {
@@ -57,7 +67,7 @@ function defaultOptions_(/* maps */) {
   };
 }
 
-const latLng2Obj = latLng =>
+const latLng2Obj = (latLng) =>
   isPlainObject(latLng) ? latLng : { lat: latLng[0], lng: latLng[1] };
 
 const _checkMinZoom = (zoom, minZoom) => {
@@ -85,7 +95,7 @@ const isFullScreen = () =>
   document.mozFullScreen ||
   document.msFullscreenElement;
 
-export default class GoogleMap extends Component {
+class GoogleMap extends Component {
   static propTypes = {
     apiKey: PropTypes.string,
     bootstrapURLKeys: PropTypes.any,
@@ -118,6 +128,7 @@ export default class GoogleMap extends Component {
     onZoomAnimationStart: PropTypes.func,
     onZoomAnimationEnd: PropTypes.func,
     onDrag: PropTypes.func,
+    onDragEnd: PropTypes.func,
     onMapTypeIdChange: PropTypes.func,
     onTilesLoaded: PropTypes.func,
     options: PropTypes.any,
@@ -132,6 +143,7 @@ export default class GoogleMap extends Component {
     style: PropTypes.any,
     resetBoundsOnResize: PropTypes.bool,
     layerTypes: PropTypes.arrayOf(PropTypes.string), // ['TransitLayer', 'TrafficLayer']
+    shouldUnregisterMapOnUnmount: PropTypes.bool,
   };
 
   static defaultProps = {
@@ -156,6 +168,7 @@ export default class GoogleMap extends Component {
     layerTypes: [],
     heatmap: {},
     heatmapLibrary: false,
+    shouldUnregisterMapOnUnmount: true,
   };
 
   static googleMapLoader = googleMapLoader; // eslint-disable-line
@@ -240,7 +253,7 @@ export default class GoogleMap extends Component {
     this.zoomAnimationInProgress_ = false;
 
     this.state = {
-      overlayCreated: false,
+      overlay: null,
     };
   }
 
@@ -284,19 +297,29 @@ export default class GoogleMap extends Component {
     );
     if (this.props.resetBoundsOnResize) {
       const that = this;
-      detectElementResize.addResizeListener(mapDom, that._mapDomResizeCallback);
+      addResizeListener(mapDom, that._mapDomResizeCallback);
     }
   }
 
-  componentWillReceiveProps(nextProps) {
+  shouldComponentUpdate(nextProps, nextState) {
+    // draggable does not affect inner components
+    return (
+      !shallowEqual(
+        omit(this.props, ['draggable']),
+        omit(nextProps, ['draggable'])
+      ) || !shallowEqual(this.state, nextState)
+    );
+  }
+
+  componentDidUpdate(prevProps) {
     if (process.env.NODE_ENV !== 'production') {
-      if (!shallowEqual(this.props.defaultCenter, nextProps.defaultCenter)) {
+      if (!shallowEqual(prevProps.defaultCenter, this.props.defaultCenter)) {
         console.warn(
           "GoogleMap: defaultCenter prop changed. You can't change default props."
         );
       }
 
-      if (!shallowEqual(this.props.defaultZoom, nextProps.defaultZoom)) {
+      if (!shallowEqual(prevProps.defaultZoom, this.props.defaultZoom)) {
         console.warn(
           "GoogleMap: defaultZoom prop changed. You can't change default props."
         );
@@ -304,63 +327,64 @@ export default class GoogleMap extends Component {
     }
 
     if (
-      !this._isCenterDefined(this.props.center) &&
-      this._isCenterDefined(nextProps.center)
+      !this._isCenterDefined(prevProps.center) &&
+      this._isCenterDefined(this.props.center)
     ) {
       setTimeout(() => this._initMap(), 0);
     }
 
     if (this.map_) {
       const centerLatLng = this.geoService_.getCenter();
-      if (this._isCenterDefined(nextProps.center)) {
-        const nextPropsCenter = latLng2Obj(nextProps.center);
-        const currCenter = this._isCenterDefined(this.props.center)
-          ? latLng2Obj(this.props.center)
+      if (this._isCenterDefined(this.props.center)) {
+        const currentCenter = latLng2Obj(this.props.center);
+        const prevCenter = this._isCenterDefined(prevProps.center)
+          ? latLng2Obj(prevProps.center)
           : null;
 
         if (
-          !currCenter ||
-          Math.abs(nextPropsCenter.lat - currCenter.lat) +
-            Math.abs(nextPropsCenter.lng - currCenter.lng) >
+          !prevCenter ||
+          Math.abs(currentCenter.lat - prevCenter.lat) +
+            Math.abs(currentCenter.lng - prevCenter.lng) >
             kEPS
         ) {
           if (
-            Math.abs(nextPropsCenter.lat - centerLatLng.lat) +
-              Math.abs(nextPropsCenter.lng - centerLatLng.lng) >
+            Math.abs(currentCenter.lat - centerLatLng.lat) +
+              Math.abs(currentCenter.lng - centerLatLng.lng) >
             kEPS
           ) {
             this.map_.panTo({
-              lat: nextPropsCenter.lat,
-              lng: nextPropsCenter.lng,
+              lat: currentCenter.lat,
+              lng: currentCenter.lng,
             });
           }
         }
       }
 
-      if (!isEmpty(nextProps.zoom)) {
+      if (!isEmpty(this.props.zoom)) {
         // if zoom chaged by user
-        if (Math.abs(nextProps.zoom - this.props.zoom) > 0) {
-          this.map_.setZoom(nextProps.zoom);
+        if (Math.abs(this.props.zoom - prevProps.zoom) > 0) {
+          this.map_.setZoom(this.props.zoom);
         }
       }
 
-      if (!isEmpty(this.props.draggable) && isEmpty(nextProps.draggable)) {
+      if (!isEmpty(prevProps.draggable) && isEmpty(this.props.draggable)) {
         // reset to default
         this.map_.setOptions({ draggable: this.defaultDraggableOption_ });
-      } else if (!shallowEqual(this.props.draggable, nextProps.draggable)) {
+      } else if (!shallowEqual(prevProps.draggable, this.props.draggable)) {
         // also prevent this on window 'mousedown' event to prevent map move
-        this.map_.setOptions({ draggable: nextProps.draggable });
+        this.map_.setOptions({ draggable: this.props.draggable });
       }
 
       // use shallowEqual to try avoid calling map._setOptions if only the ref changes
       if (
-        !isEmpty(nextProps.options) &&
-        !shallowEqual(this.props.options, nextProps.options)
+        !isEmpty(this.props.options) &&
+        !shallowEqual(prevProps.options, this.props.options)
       ) {
         const mapPlainObjects = pick(this.maps_, isPlainObject);
-        let options = typeof nextProps.options === 'function'
-          ? nextProps.options(mapPlainObjects)
-          : nextProps.options;
+        let options =
+          typeof this.props.options === 'function'
+            ? this.props.options(mapPlainObjects)
+            : this.props.options;
         // remove zoom, center and draggable options as these are managed by google-maps-react
         options = omit(options, ['zoom', 'center', 'draggable']);
 
@@ -372,25 +396,35 @@ export default class GoogleMap extends Component {
         this.map_.setOptions(options);
       }
 
-      if (!shallowEqual(nextProps.layerTypes, this.props.layerTypes)) {
-        Object.keys(this.layers_).forEach(layerKey => {
+      if (!shallowEqual(this.props.layerTypes, prevProps.layerTypes)) {
+        Object.keys(this.layers_).forEach((layerKey) => {
           this.layers_[layerKey].setMap(null);
           delete this.layers_[layerKey];
         });
-        this._setLayers(nextProps.layerTypes);
+        this._setLayers(this.props.layerTypes);
+      }
+
+      if (
+        this.heatmap &&
+        !shallowEqual(this.props.heatmap.positions, prevProps.heatmap.positions)
+      ) {
+        this.heatmap.setData(
+          this.props.heatmap.positions.map((p) => ({
+            location: new this.maps_.LatLng(p.lat, p.lng),
+            weight: p.weight,
+          }))
+        );
+      }
+      if (
+        this.heatmap &&
+        !shallowEqual(this.props.heatmap.options, prevProps.heatmap.options)
+      ) {
+        Object.keys(this.props.heatmap.options).forEach((option) => {
+          this.heatmap.set(option, this.props.heatmap.options[option]);
+        });
       }
     }
-  }
-
-  shouldComponentUpdate(nextProps, nextState) {
-    // draggable does not affect inner components
-    return !shallowEqual(
-      omit(this.props, ['draggable']),
-      omit(nextProps, ['draggable'])
-    ) || !shallowEqual(this.state, nextState);
-  }
-
-  componentDidUpdate(prevProps) {
+    // emit actions
     this.markersDispatcher_.emit('kON_CHANGE');
 
     if (!shallowEqual(this.props.hoverDistance, prevProps.hoverDistance)) {
@@ -408,10 +442,7 @@ export default class GoogleMap extends Component {
     window.removeEventListener('keydown', this._onKeyDownCapture);
     window.removeEventListener('mouseup', this._onChildMouseUp, false);
     if (this.props.resetBoundsOnResize) {
-      detectElementResize.removeResizeListener(
-        mapDom,
-        this._mapDomResizeCallback
-      );
+      removeResizeListener(mapDom, this._mapDomResizeCallback);
     }
 
     if (this.overlay_) {
@@ -419,40 +450,43 @@ export default class GoogleMap extends Component {
       this.overlay_.setMap(null);
     }
 
-    if (this.maps_ && this.map_) {
+    if (this.maps_ && this.map_ && this.props.shouldUnregisterMapOnUnmount) {
       // fix google, as otherwise listeners works even without map
       this.map_.setOptions({ scrollwheel: false });
       this.maps_.event.clearInstanceListeners(this.map_);
     }
 
-    this.map_ = null;
-    this.maps_ = null;
+    if (this.props.shouldUnregisterMapOnUnmount) {
+      this.map_ = null;
+      this.maps_ = null;
+    }
     this.markersDispatcher_.dispose();
 
     this.resetSizeOnIdle_ = false;
 
-    delete this.map_;
-    delete this.markersDispatcher_;
+    if (this.props.shouldUnregisterMapOnUnmount) {
+      delete this.map_;
+      delete this.markersDispatcher_;
+    }
   }
+
   // calc minZoom if map size available
   // it's better to not set minZoom less than this calculation gives
   // otherwise there is no homeomorphism between screen coordinates and map
   // (one map coordinate can have different screen coordinates)
   _getMinZoom = () => {
     if (this.geoService_.getWidth() > 0 || this.geoService_.getHeight() > 0) {
-      const tilesPerWidth = Math.ceil(
-        this.geoService_.getWidth() / K_GOOGLE_TILE_SIZE
-      ) + 2;
-      const tilesPerHeight = Math.ceil(
-        this.geoService_.getHeight() / K_GOOGLE_TILE_SIZE
-      ) + 2;
+      const tilesPerWidth =
+        Math.ceil(this.geoService_.getWidth() / K_GOOGLE_TILE_SIZE) + 2;
+      const tilesPerHeight =
+        Math.ceil(this.geoService_.getHeight() / K_GOOGLE_TILE_SIZE) + 2;
       const maxTilesPerDim = Math.max(tilesPerWidth, tilesPerHeight);
       return Math.ceil(log2(maxTilesPerDim));
     }
     return DEFAULT_MIN_ZOOM;
   };
 
-  _computeMinZoom = minZoom => {
+  _computeMinZoom = (minZoom) => {
     if (!isEmpty(minZoom)) {
       return minZoom;
     }
@@ -471,12 +505,27 @@ export default class GoogleMap extends Component {
     }
   };
 
-  _setLayers = layerTypes => {
-    layerTypes.forEach(layerType => {
+  _setLayers = (layerTypes) => {
+    layerTypes.forEach((layerType) => {
       this.layers_[layerType] = new this.maps_[layerType]();
       this.layers_[layerType].setMap(this.map_);
     });
   };
+
+  _renderPortal = () => (
+    <GoogleMapMarkers
+      experimental={this.props.experimental}
+      onChildClick={this._onChildClick}
+      onChildMouseDown={this._onChildMouseDown}
+      onChildMouseEnter={this._onChildMouseEnter}
+      onChildMouseLeave={this._onChildMouseLeave}
+      geoService={this.geoService_}
+      insideMapPanes
+      distanceToMouse={this.props.distanceToMouse}
+      getHoverDistance={this._getHoverDistance}
+      dispatcher={this.markersDispatcher_}
+    />
+  );
 
   _initMap = () => {
     // only initialize the map once
@@ -503,7 +552,7 @@ export default class GoogleMap extends Component {
 
     this.props
       .googleMapLoader(bootstrapURLKeys, this.props.heatmapLibrary)
-      .then(maps => {
+      .then((maps) => {
         if (!this.mounted_) {
           return;
         }
@@ -536,9 +585,10 @@ export default class GoogleMap extends Component {
         // "MaxZoomStatus", "StreetViewStatus", "TransitMode", "TransitRoutePreference",
         // "TravelMode", "UnitSystem"
         const mapPlainObjects = pick(maps, isPlainObject);
-        const options = typeof this.props.options === 'function'
-          ? this.props.options(mapPlainObjects)
-          : this.props.options;
+        const options =
+          typeof this.props.options === 'function'
+            ? this.props.options(mapPlainObjects)
+            : this.props.options;
         const defaultOptions = defaultOptions_(mapPlainObjects);
 
         const draggableOptions = !isEmpty(this.props.draggable) && {
@@ -585,15 +635,12 @@ export default class GoogleMap extends Component {
         const this_ = this;
         const overlay = Object.assign(new maps.OverlayView(), {
           onAdd() {
-            const K_MAX_WIDTH = typeof screen !== 'undefined'
-              ? `${screen.width}px`
-              : '2000px';
-            const K_MAX_HEIGHT = typeof screen !== 'undefined'
-              ? `${screen.height}px`
-              : '2000px';
+            const K_MAX_WIDTH =
+              typeof screen !== 'undefined' ? `${screen.width}px` : '2000px';
+            const K_MAX_HEIGHT =
+              typeof screen !== 'undefined' ? `${screen.height}px` : '2000px';
 
             const div = document.createElement('div');
-            this.div = div;
             div.style.backgroundColor = 'transparent';
             div.style.position = 'absolute';
             div.style.left = '0px';
@@ -604,7 +651,7 @@ export default class GoogleMap extends Component {
             if (this_.props.overlayViewDivStyle) {
               const { overlayViewDivStyle } = this_.props;
               if (typeof overlayViewDivStyle === 'object') {
-                Object.keys(overlayViewDivStyle).forEach(property => {
+                Object.keys(overlayViewDivStyle).forEach((property) => {
                   div.style[property] = overlayViewDivStyle[property];
                 });
               }
@@ -616,30 +663,26 @@ export default class GoogleMap extends Component {
               maps,
               overlay.getProjection()
             );
-            ReactDOM.unstable_renderSubtreeIntoContainer(
-              this_,
-              <GoogleMapMarkers
-                experimental={this_.props.experimental}
-                onChildClick={this_._onChildClick}
-                onChildMouseDown={this_._onChildMouseDown}
-                onChildMouseEnter={this_._onChildMouseEnter}
-                onChildMouseLeave={this_._onChildMouseLeave}
-                geoService={this_.geoService_}
-                insideMapPanes
-                distanceToMouse={this_.props.distanceToMouse}
-                getHoverDistance={this_._getHoverDistance}
-                dispatcher={this_.markersDispatcher_}
-              />,
-              div,
-              // remove prerendered markers
-              () => this_.setState({ overlayCreated: true })
-            );
+
+            if (!IS_REACT_16) {
+              createPortal(
+                this_,
+                this_._renderPortal(),
+                div,
+                // remove prerendered markers
+                () => this_.setState({ overlay: div })
+              );
+            } else {
+              this_.setState({ overlay: div });
+            }
           },
 
           onRemove() {
-            if (this.div) {
-              ReactDOM.unmountComponentAtNode(this.div);
+            const renderedOverlay = this_.state.overlay;
+            if (renderedOverlay && !IS_REACT_16) {
+              ReactDOM.unmountComponentAtNode(renderedOverlay);
             }
+            this_.setState({ overlay: null });
           },
 
           draw() {
@@ -647,7 +690,7 @@ export default class GoogleMap extends Component {
             this_._onBoundsChanged(map, maps, !this_.props.debounced);
 
             if (!this_.googleApiLoadedCalled_) {
-              this_._onGoogleApiLoaded({ map, maps });
+              this_._onGoogleApiLoaded({ map, maps, ref: this_.googleMapDom_ });
               this_.googleApiLoadedCalled_ = true;
             }
 
@@ -688,7 +731,7 @@ export default class GoogleMap extends Component {
           if (this_.geoService_.getZoom() !== map.getZoom()) {
             if (!this_.zoomAnimationInProgress_) {
               this_.zoomAnimationInProgress_ = true;
-              this_._onZoomAnimationStart();
+              this_._onZoomAnimationStart(map.zoom);
             }
 
             // If draw() is not called each frame during a zoom animation,
@@ -697,7 +740,8 @@ export default class GoogleMap extends Component {
               const TIMEOUT_ZOOM = 300;
 
               if (
-                new Date().getTime() - this.zoomControlClickTime_ < TIMEOUT_ZOOM
+                new Date().getTime() - this.zoomControlClickTime_ <
+                TIMEOUT_ZOOM
               ) {
                 // there is strange Google Map Api behavior in chrome when zoom animation of map
                 // is started only on second raf call, if was click on zoom control
@@ -709,7 +753,8 @@ export default class GoogleMap extends Component {
                   raf(() => {
                     this_.updateCounter_++;
                     this_._onBoundsChanged(map, maps);
-                  }));
+                  })
+                );
               } else {
                 this_.updateCounter_++;
                 this_._onBoundsChanged(map, maps);
@@ -721,9 +766,7 @@ export default class GoogleMap extends Component {
         maps.event.addListener(map, 'idle', () => {
           if (this.resetSizeOnIdle_) {
             this._setViewSize();
-            const currMinZoom = this._computeMinZoom(
-              this.props.options.minZoom
-            );
+            const currMinZoom = this._computeMinZoom(options.minZoom);
 
             if (currMinZoom !== this.minZoom_) {
               this.minZoom_ = currMinZoom;
@@ -735,7 +778,7 @@ export default class GoogleMap extends Component {
 
           if (this_.zoomAnimationInProgress_) {
             this_.zoomAnimationInProgress_ = false;
-            this_._onZoomAnimationEnd();
+            this_._onZoomAnimationEnd(map.zoom);
           }
 
           this_.updateCounter_++;
@@ -770,16 +813,29 @@ export default class GoogleMap extends Component {
 
         maps.event.addListener(map, 'drag', () => {
           this_.dragTime_ = new Date().getTime();
-          this_._onDrag();
+          this_._onDrag(map);
+        });
+
+        maps.event.addListener(map, 'dragend', () => {
+          // 'dragend' fires on mouse release.
+          // 'idle' listener waits until drag inertia ends before firing `onDragEnd`
+          const idleListener = maps.event.addListener(map, 'idle', () => {
+            maps.event.removeListener(idleListener);
+            this_._onDragEnd(map);
+          });
         });
         // user choosing satellite vs roads, etc
         maps.event.addListener(map, 'maptypeid_changed', () => {
           this_._onMapTypeIdChange(map.getMapTypeId());
         });
       })
-      .catch(e => {
+      .catch((e) => {
         // notify callback of load failure
-        this._onGoogleApiLoaded({ map: null, maps: null });
+        this._onGoogleApiLoaded({
+          map: null,
+          maps: null,
+          ref: this.googleMapDom_,
+        });
         console.error(e); // eslint-disable-line no-console
         throw e;
       });
@@ -807,6 +863,9 @@ export default class GoogleMap extends Component {
   _getHoverDistance = () => this.props.hoverDistance;
 
   _onDrag = (...args) => this.props.onDrag && this.props.onDrag(...args);
+
+  _onDragEnd = (...args) =>
+    this.props.onDragEnd && this.props.onDragEnd(...args);
 
   _onMapTypeIdChange = (...args) =>
     this.props.onMapTypeIdChange && this.props.onMapTypeIdChange(...args);
@@ -886,7 +945,7 @@ export default class GoogleMap extends Component {
     this.resetSizeOnIdle_ = true;
   };
 
-  _onMapMouseMove = e => {
+  _onMapMouseMove = (e) => {
     if (!this.mouseInMap_) return;
 
     const currTime = new Date().getTime();
@@ -929,7 +988,7 @@ export default class GoogleMap extends Component {
     this.dragTime_ === 0 &&
     this.props.onClick(...args);
 
-  _onMapClick = event => {
+  _onMapClick = (event) => {
     if (this.markersDispatcher_) {
       // support touch events and recalculate mouse position on click
       this._onMapMouseMove(event);
@@ -949,13 +1008,13 @@ export default class GoogleMap extends Component {
 
   // gmap can't prevent map drag if mousedown event already occured
   // the only workaround I find is prevent mousedown native browser event
-  _onMapMouseDownNative = event => {
+  _onMapMouseDownNative = (event) => {
     if (!this.mouseInMap_) return;
 
     this._onMapMouseDown(event);
   };
 
-  _onMapMouseDown = event => {
+  _onMapMouseDown = (event) => {
     if (this.markersDispatcher_) {
       const currTime = new Date().getTime();
       if (currTime - this.dragTime_ > K_IDLE_TIMEOUT) {
@@ -980,7 +1039,7 @@ export default class GoogleMap extends Component {
     }
   };
 
-  _isCenterDefined = center =>
+  _isCenterDefined = (center) =>
     center &&
     ((isPlainObject(center) && isNumber(center.lat) && isNumber(center.lng)) ||
       (center.length === 2 && isNumber(center[0]) && isNumber(center[1])));
@@ -1072,25 +1131,26 @@ export default class GoogleMap extends Component {
     }
   };
 
-  _registerChild = ref => {
+  _registerChild = (ref) => {
     this.googleMapDom_ = ref;
   };
 
   render() {
-    const mapMarkerPrerender = !this.state.overlayCreated
-      ? <GoogleMapMarkersPrerender
-          experimental={this.props.experimental}
-          onChildClick={this._onChildClick}
-          onChildMouseDown={this._onChildMouseDown}
-          onChildMouseEnter={this._onChildMouseEnter}
-          onChildMouseLeave={this._onChildMouseLeave}
-          geoService={this.geoService_}
-          insideMapPanes={false}
-          distanceToMouse={this.props.distanceToMouse}
-          getHoverDistance={this._getHoverDistance}
-          dispatcher={this.markersDispatcher_}
-        />
-      : null;
+    const overlay = this.state.overlay;
+    const mapMarkerPrerender = !overlay ? (
+      <GoogleMapMarkersPrerender
+        experimental={this.props.experimental}
+        onChildClick={this._onChildClick}
+        onChildMouseDown={this._onChildMouseDown}
+        onChildMouseEnter={this._onChildMouseEnter}
+        onChildMouseLeave={this._onChildMouseLeave}
+        geoService={this.geoService_}
+        insideMapPanes={false}
+        distanceToMouse={this.props.distanceToMouse}
+        getHoverDistance={this._getHoverDistance}
+        dispatcher={this.markersDispatcher_}
+      />
+    ) : null;
 
     return (
       <div
@@ -1100,6 +1160,7 @@ export default class GoogleMap extends Component {
         onClick={this._onMapClick}
       >
         <GoogleMapMap registerChild={this._registerChild} />
+        {IS_REACT_16 && overlay && createPortal(this._renderPortal(), overlay)}
 
         {/* render markers before map load done */}
         {mapMarkerPrerender}
@@ -1107,3 +1168,5 @@ export default class GoogleMap extends Component {
     );
   }
 }
+
+export default GoogleMap;
